@@ -29,6 +29,7 @@ class RtmpSinkAdapter:
         self._logger = logger
 
         self._proc: asyncio.subprocess.Process | None = None
+        self._ffmpeg_path: str | None = None
         self._source_info: SourceInfo | None = None
 
     async def open(self, source: SourceInfo) -> None:
@@ -39,24 +40,9 @@ class RtmpSinkAdapter:
         if not self._output_url.startswith(("rtmp://", "rtmps://")):
             raise TerminalError("sink_invalid_rtmp_url", "invalid RTMP URL")
 
+        self._ffmpeg_path = ffmpeg
         self._source_info = source
-        cmd = self.build_ffmpeg_cmd(ffmpeg_path=ffmpeg, output_url=self._output_url, video=self._video, audio=self._audio)
-
-        try:
-            self._proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=DEVNULL,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            await asyncio.sleep(0.2)
-            if self._proc.returncode is not None:
-                stderr = await self._read_stderr_tail()
-                raise _classify_ffmpeg_failure(stderr)
-        except WorkerError:
-            raise
-        except Exception as exc:
-            raise classify_sink_exception(exc) from exc
+        await self._start_proc(source)
 
     async def write(self, frame: VideoFrame) -> None:
         if self._proc is None or self._proc.stdin is None:
@@ -66,7 +52,13 @@ class RtmpSinkAdapter:
             stderr = await self._read_stderr_tail()
             raise _classify_ffmpeg_failure(stderr)
 
-        self._validate_frame(frame)
+        try:
+            self._validate_frame(frame)
+        except TerminalError as exc:
+            if exc.code not in {"sink_frame_size_mismatch", "sink_frame_format_mismatch"}:
+                raise
+            await self._reconfigure_for_frame(frame)
+            self._validate_frame(frame)
 
         try:
             self._proc.stdin.write(frame.data)
@@ -83,20 +75,7 @@ class RtmpSinkAdapter:
         proc = self._proc
         self._proc = None
 
-        if proc.stdin is not None:
-            try:
-                proc.stdin.close()
-                await proc.stdin.wait_closed()
-            except Exception:
-                pass
-
-        if proc.returncode is None:
-            proc.terminate()
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=3.0)
-            except TimeoutError:
-                proc.kill()
-                await proc.wait()
+        await self._terminate_proc(proc)
 
     @staticmethod
     def build_ffmpeg_cmd(
@@ -105,7 +84,13 @@ class RtmpSinkAdapter:
         output_url: str,
         video: VideoConfig,
         audio: AudioConfig,
+        source: SourceInfo | None = None,
     ) -> list[str]:
+        input_width = source.width if source else video.width
+        input_height = source.height if source else video.height
+        input_fps = source.fps if source else video.fps
+        input_pixel_format = source.pixel_format if source else video.pixel_format
+
         gop = video.fps * video.keyframe_interval_sec
         cmd: list[str] = [
             ffmpeg_path,
@@ -116,11 +101,11 @@ class RtmpSinkAdapter:
             "-f",
             "rawvideo",
             "-pix_fmt",
-            video.pixel_format,
+            input_pixel_format,
             "-s",
-            f"{video.width}x{video.height}",
+            f"{input_width}x{input_height}",
             "-r",
-            str(video.fps),
+            str(input_fps),
             "-i",
             "pipe:0",
         ]
@@ -136,6 +121,16 @@ class RtmpSinkAdapter:
                     "-shortest",
                 ]
             )
+
+        filters: list[str] = []
+        if source is not None:
+            if source.width != video.width or source.height != video.height:
+                filters.append(f"scale={video.width}:{video.height}")
+            if source.fps != video.fps:
+                filters.append(f"fps={video.fps}")
+
+        if filters:
+            cmd.extend(["-vf", ",".join(filters)])
 
         cmd.extend(
             [
@@ -189,17 +184,87 @@ class RtmpSinkAdapter:
         except TimeoutError:
             return ""
 
+    async def _start_proc(self, source: SourceInfo) -> None:
+        if not self._ffmpeg_path:
+            raise TerminalError("sink_ffmpeg_missing", "ffmpeg path not initialized")
+
+        cmd = self.build_ffmpeg_cmd(
+            ffmpeg_path=self._ffmpeg_path,
+            output_url=self._output_url,
+            video=self._video,
+            audio=self._audio,
+            source=source,
+        )
+
+        try:
+            self._proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await asyncio.sleep(0.2)
+            if self._proc.returncode is not None:
+                stderr = await self._read_stderr_tail()
+                raise _classify_ffmpeg_failure(stderr)
+        except WorkerError:
+            raise
+        except Exception as exc:
+            raise classify_sink_exception(exc) from exc
+
+    async def _reconfigure_for_frame(self, frame: VideoFrame) -> None:
+        next_source = SourceInfo(
+            width=frame.width,
+            height=frame.height,
+            fps=self._source_info.fps if self._source_info else self._video.fps,
+            pixel_format=frame.pixel_format,
+        )
+        self._logger.warning(
+            "RTMP sink input changed; restarting ffmpeg for %sx%s %s",
+            frame.width,
+            frame.height,
+            frame.pixel_format,
+        )
+
+        proc = self._proc
+        self._proc = None
+        if proc is not None:
+            await self._terminate_proc(proc)
+
+        self._source_info = next_source
+        await self._start_proc(next_source)
+
+    async def _terminate_proc(self, proc: asyncio.subprocess.Process) -> None:
+        if proc.stdin is not None:
+            try:
+                proc.stdin.close()
+                await proc.stdin.wait_closed()
+            except Exception:
+                pass
+
+        if proc.returncode is None:
+            proc.terminate()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=3.0)
+            except TimeoutError:
+                proc.kill()
+                await proc.wait()
+
     def _validate_frame(self, frame: VideoFrame) -> None:
-        if frame.width != self._video.width or frame.height != self._video.height:
+        expected_width = self._source_info.width if self._source_info else self._video.width
+        expected_height = self._source_info.height if self._source_info else self._video.height
+        expected_pixel_format = self._source_info.pixel_format if self._source_info else self._video.pixel_format
+
+        if frame.width != expected_width or frame.height != expected_height:
             raise TerminalError(
                 "sink_frame_size_mismatch",
-                f"Expected {self._video.width}x{self._video.height}, got {frame.width}x{frame.height}",
+                f"Expected {expected_width}x{expected_height}, got {frame.width}x{frame.height}",
             )
 
-        if frame.pixel_format != self._video.pixel_format:
+        if frame.pixel_format != expected_pixel_format:
             raise TerminalError(
                 "sink_frame_format_mismatch",
-                f"Expected {self._video.pixel_format}, got {frame.pixel_format}",
+                f"Expected {expected_pixel_format}, got {frame.pixel_format}",
             )
 
         expected = _expected_frame_size(frame.width, frame.height, frame.pixel_format)

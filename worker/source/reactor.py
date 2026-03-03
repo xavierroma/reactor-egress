@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 import inspect
 import logging
 import time
@@ -31,15 +32,22 @@ class ReactorSourceAdapter:
 
         self._client: Any | None = None
         self._track: Any | None = None
+        self._prefetched_frames: deque[VideoFrame] = deque()
+        self._event_track: Any | None = None
+        self._event_track_ready = asyncio.Event()
+        self._event_unsubscribers: list[Callable[[], None]] = []
 
     async def open(self) -> SourceInfo:
         try:
             self._client = self._create_client()
+            self._attach_track_listeners()
             await _maybe_await(self._client.connect())
             await self._wait_until_ready()
             await self._bootstrap_if_configured()
             self._track = await self._wait_for_track()
-            return self._derive_source_info(self._track)
+            source_info = self._derive_source_info(self._track)
+            source_info = await self._probe_source_info_from_frame(source_info)
+            return source_info
         except WorkerError:
             raise
         except Exception as exc:
@@ -48,6 +56,8 @@ class ReactorSourceAdapter:
     async def recv(self) -> VideoFrame:
         if self._track is None:
             raise TerminalError("source_track_unavailable", "Reactor track is not available")
+        if self._prefetched_frames:
+            return self._prefetched_frames.popleft()
         try:
             raw_frame = await _maybe_await(self._track.recv())
             return self._to_video_frame(raw_frame)
@@ -69,7 +79,11 @@ class ReactorSourceAdapter:
             elif callable(close):
                 await _maybe_await(close())
         finally:
+            self._detach_track_listeners()
             self._track = None
+            self._prefetched_frames.clear()
+            self._event_track = None
+            self._event_track_ready.clear()
             self._client = None
 
     def _create_client(self) -> Any:
@@ -173,20 +187,100 @@ class ReactorSourceAdapter:
             raise TerminalError("source_client_missing", "Reactor client missing")
 
         get_track = getattr(self._client, "get_remote_track", None)
-        if not callable(get_track):
-            raise TerminalError("source_track_api_missing", "Reactor client missing get_remote_track()")
+        if callable(get_track):
+            async def _next_track() -> Any:
+                return await _maybe_await(get_track())
+        else:
+            get_tracks = getattr(self._client, "get_remote_tracks", None)
+            if not callable(get_tracks):
+                raise TerminalError(
+                    "source_track_api_missing",
+                    "Reactor client missing get_remote_track()/get_remote_tracks()",
+                )
+
+            async def _next_track() -> Any:
+                tracks = await _maybe_await(get_tracks())
+                return _select_remote_track(tracks)
 
         deadline = time.monotonic() + self._config.track_timeout_sec
         while time.monotonic() < deadline:
-            track = await _maybe_await(get_track())
+            cached_track = self._consume_event_track()
+            if cached_track is not None:
+                return cached_track
+
+            track = await _next_track()
             if track is not None:
                 return track
-            await asyncio.sleep(0.2)
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+
+            wait_timeout = min(0.2, remaining)
+            try:
+                await asyncio.wait_for(self._event_track_ready.wait(), timeout=wait_timeout)
+            except asyncio.TimeoutError:
+                pass
 
         raise RetryableError(
             "source_track_timeout",
             f"No remote track received within {self._config.track_timeout_sec}s",
         )
+
+    def _attach_track_listeners(self) -> None:
+        if self._client is None:
+            return
+
+        on = getattr(self._client, "on", None)
+        if not callable(on):
+            return
+
+        off = getattr(self._client, "off", None)
+
+        def _register(event_name: str, handler: Callable[..., None]) -> None:
+            try:
+                on(event_name, handler)
+            except Exception as exc:
+                self._logger.debug("Failed to register Reactor event listener for %s: %s", event_name, exc)
+                return
+
+            if callable(off):
+                def _unsubscribe() -> None:
+                    try:
+                        off(event_name, handler)
+                    except Exception:
+                        return
+
+                self._event_unsubscribers.append(_unsubscribe)
+
+        def _on_track_received(*args: Any) -> None:
+            track = _track_from_event_args(args)
+            self._cache_event_track(track)
+
+        def _on_stream_changed(track: Any) -> None:
+            self._cache_event_track(track)
+
+        _register("track_received", _on_track_received)
+        _register("stream_changed", _on_stream_changed)
+
+    def _detach_track_listeners(self) -> None:
+        while self._event_unsubscribers:
+            unsubscribe = self._event_unsubscribers.pop()
+            unsubscribe()
+
+    def _cache_event_track(self, track: Any) -> None:
+        if not _is_video_track(track):
+            return
+        self._event_track = track
+        self._event_track_ready.set()
+
+    def _consume_event_track(self) -> Any | None:
+        track = self._event_track
+        if track is None:
+            return None
+        self._event_track = None
+        self._event_track_ready.clear()
+        return track
 
     def _derive_source_info(self, track: Any) -> SourceInfo:
         width = int(getattr(track, "width", self._video.width))
@@ -194,6 +288,38 @@ class ReactorSourceAdapter:
         fps = int(getattr(track, "fps", self._video.fps))
         pixel_format = str(getattr(track, "pixel_format", self._video.pixel_format))
         return SourceInfo(width=width, height=height, fps=fps, pixel_format=pixel_format)
+
+    async def _probe_source_info_from_frame(self, base: SourceInfo) -> SourceInfo:
+        if self._track is None:
+            return base
+
+        deadline = time.monotonic() + 3.0
+        observed: VideoFrame | None = None
+
+        for _ in range(5):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+
+            try:
+                raw_frame = await asyncio.wait_for(_maybe_await(self._track.recv()), timeout=remaining)
+            except asyncio.TimeoutError:
+                break
+
+            frame = self._to_video_frame(raw_frame)
+            self._prefetched_frames.append(frame)
+            observed = frame
+
+        if observed is None:
+            self._logger.warning("Timed out probing initial Reactor frames; using default source info")
+            return base
+
+        return SourceInfo(
+            width=observed.width,
+            height=observed.height,
+            fps=base.fps,
+            pixel_format=observed.pixel_format,
+        )
 
     def _to_video_frame(self, raw_frame: Any) -> VideoFrame:
         if isinstance(raw_frame, VideoFrame):
@@ -270,6 +396,48 @@ def _normalize_status(value: Any) -> str:
     if "." in text:
         return text.rsplit(".", maxsplit=1)[-1]
     return text
+
+
+def _select_remote_track(tracks: Any) -> Any | None:
+    if tracks is None:
+        return None
+
+    candidates: list[Any]
+    if isinstance(tracks, dict):
+        candidates = list(tracks.values())
+    elif isinstance(tracks, (list, tuple, set)):
+        candidates = list(tracks)
+    else:
+        return tracks
+
+    if not candidates:
+        return None
+
+    for track in candidates:
+        kind = getattr(track, "kind", None)
+        if isinstance(kind, str) and kind.lower() == "video":
+            return track
+
+    return candidates[0]
+
+
+def _track_from_event_args(args: tuple[Any, ...]) -> Any | None:
+    for arg in args:
+        if _is_video_track(arg):
+            return arg
+    return None
+
+
+def _is_video_track(track: Any) -> bool:
+    if track is None:
+        return False
+    recv = getattr(track, "recv", None)
+    if not callable(recv):
+        return False
+    kind = getattr(track, "kind", None)
+    if isinstance(kind, str):
+        return kind.lower() == "video"
+    return True
 
 
 async def _call_send_command(*, send_command: Any, command: str, data: dict[str, Any]) -> None:
