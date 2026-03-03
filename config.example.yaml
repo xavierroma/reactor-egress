@@ -1,0 +1,41 @@
+job:
+  id: "job_local_001"
+  name: "demo"
+
+source:
+  type: "reactor"
+  model_name: "livecore"
+  api_key_ref: "env:REACTOR_API_KEY"
+  track_timeout_sec: 30
+  ready_timeout_sec: 30
+  bootstrap:
+    start_prompt: "cinematic flyover..."
+    auto_start: true
+
+sink:
+  type: "rtmp"
+  url: "rtmp://localhost/live/stream"
+  stream_key_ref: "env:RTMP_STREAM_KEY"
+
+video:
+  fps: 24
+  width: 1280
+  height: 720
+  pixel_format: "yuv420p"
+  bitrate_kbps: 1200
+  keyframe_interval_sec: 2
+
+audio:
+  inject_silence: true
+  sample_rate: 48000
+  channels: 2
+
+retry:
+  max_attempts: 5
+  base_backoff_sec: 2
+  max_backoff_sec: 32
+  jitter_ratio: 0.2
+
+runtime:
+  frame_queue_size: 48
+  log_level: "info"

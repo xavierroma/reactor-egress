@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "reactor-egress-worker"
+version = "0.1.0"
+description = "Phase 1 local worker for Reactor -> RTMP egress"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+  { name = "Reactor Egress" }
+]
+dependencies = [
+  "pydantic>=2.9.0,<3",
+  "PyYAML>=6.0.2,<7",
+  "reactor-sdk>=0.2.2",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8.3.0,<9",
+  "pytest-asyncio>=0.24.0,<1",
+]
+
+[project.scripts]
+reactor-egress-worker = "worker.cli:main"
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+  "integration: integration-level tests that require external binaries/services",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["worker"]
