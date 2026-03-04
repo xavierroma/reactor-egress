@@ -27,3 +27,29 @@ class BoundedFrameQueue:
             return await asyncio.wait_for(self._queue.get(), timeout=timeout_sec)
         except TimeoutError:
             return None
+
+    async def pop_latest(self, timeout_sec: float = 0.5) -> VideoFrame | None:
+        frame = await self.pop(timeout_sec=timeout_sec)
+        if frame is None:
+            return None
+        return self._drain_to_latest(frame)
+
+    def pop_latest_nowait(self) -> VideoFrame | None:
+        try:
+            frame = self._queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return None
+        return self._drain_to_latest(frame)
+
+    def _drain_to_latest(self, frame: VideoFrame) -> VideoFrame:
+        dropped = 0
+        while True:
+            try:
+                frame = self._queue.get_nowait()
+                dropped += 1
+            except asyncio.QueueEmpty:
+                break
+
+        if dropped:
+            self._metrics.inc_frame_drop(dropped)
+        return frame

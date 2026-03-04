@@ -134,6 +134,10 @@ class RtmpSinkAdapter:
 
         cmd.extend(
             [
+                "-r",
+                str(video.fps),
+                "-vsync",
+                "cfr",
                 "-c:v",
                 "libx264",
                 "-preset",

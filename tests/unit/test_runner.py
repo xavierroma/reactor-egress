@@ -40,6 +40,22 @@ class FakeSink:
         self.closed = True
 
 
+class FastSource(FakeSource):
+    async def recv(self) -> VideoFrame:  # type: ignore[override]
+        await asyncio.sleep(0)
+        return VideoFrame(data=b"aaaaaa", width=2, height=2, pixel_format="yuv420p")
+
+
+class CountingSink(FakeSink):
+    def __init__(self) -> None:
+        super().__init__()
+        self.writes = 0
+
+    async def write(self, _frame: VideoFrame) -> None:  # type: ignore[override]
+        self.writes += 1
+        await asyncio.sleep(0)
+
+
 @pytest.mark.asyncio
 async def test_runner_returns_130_on_interrupt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("REACTOR_API_KEY", "rk_test")
@@ -86,3 +102,56 @@ video:
     assert exit_code == 130
     assert source.closed is True
     assert sink.closed is True
+
+
+@pytest.mark.asyncio
+async def test_runner_consumer_paces_and_drops_when_source_is_faster(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("REACTOR_API_KEY", "rk_test")
+    cfg_file = tmp_path / "cfg.yaml"
+    cfg_file.write_text(
+        """
+job:
+  id: job_2
+  name: demo
+source:
+  type: reactor
+  model_name: livecore
+  api_key_ref: env:REACTOR_API_KEY
+sink:
+  type: rtmp
+  url: rtmp://localhost/live
+video:
+  fps: 10
+  width: 16
+  height: 16
+  pixel_format: yuv420p
+  bitrate_kbps: 300
+  keyframe_interval_sec: 2
+runtime:
+  frame_queue_size: 2
+""",
+        encoding="utf-8",
+    )
+    cfg = load_config(cfg_file)
+
+    source = FastSource()
+    sink = CountingSink()
+    runner = WorkerRunner(
+        config=cfg,
+        source_factory=lambda: source,
+        sink_factory=lambda: sink,
+        logger=logging.getLogger(__name__),
+    )
+
+    task = asyncio.create_task(runner.run())
+    await asyncio.sleep(0.35)
+    runner.request_stop(interrupted=True)
+    exit_code = await asyncio.wait_for(task, timeout=2.0)
+
+    assert exit_code == 130
+    assert source.closed is True
+    assert sink.closed is True
+    assert 1 <= sink.writes <= 6
+    assert runner._metrics.egress_frame_drop_total > 0  # noqa: SLF001

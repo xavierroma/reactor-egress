@@ -57,15 +57,21 @@ def _audio_cfg() -> AudioConfig:
 
 
 def test_build_ffmpeg_cmd_contains_expected_flags() -> None:
+    video = _video_cfg()
     cmd = RtmpSinkAdapter.build_ffmpeg_cmd(
         ffmpeg_path="ffmpeg",
         output_url="rtmp://localhost/live/abc",
-        video=_video_cfg(),
+        video=video,
         audio=_audio_cfg(),
     )
 
     assert "-c:v" in cmd
     assert "libx264" in cmd
+    assert "-vsync" in cmd
+    assert cmd[cmd.index("-vsync") + 1] == "cfr"
+    r_indices = [i for i, token in enumerate(cmd) if token == "-r"]
+    assert r_indices
+    assert cmd[r_indices[-1] + 1] == str(video.fps)
     assert "-f" in cmd
     assert "flv" in cmd
     assert cmd[-1] == "rtmp://localhost/live/abc"

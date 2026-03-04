@@ -26,3 +26,25 @@ async def test_drop_oldest_when_queue_full() -> None:
     assert out1 is not None and out1.data == b"bbbbbb"
     assert out2 is not None and out2.data == b"cccccc"
     assert metrics.egress_frame_drop_total == 1
+
+
+@pytest.mark.asyncio
+async def test_pop_latest_drops_stale_frames() -> None:
+    metrics = WorkerMetrics()
+    queue = BoundedFrameQueue(maxsize=8, metrics=metrics)
+
+    for payload in (b"111111", b"222222", b"333333", b"444444"):
+        await queue.push(VideoFrame(data=payload, width=2, height=2, pixel_format="yuv420p"))
+
+    latest = await queue.pop_latest(timeout_sec=0.1)
+
+    assert latest is not None and latest.data == b"444444"
+    assert metrics.egress_frame_drop_total == 3
+
+
+@pytest.mark.asyncio
+async def test_pop_latest_nowait_returns_none_when_empty() -> None:
+    metrics = WorkerMetrics()
+    queue = BoundedFrameQueue(maxsize=2, metrics=metrics)
+
+    assert queue.pop_latest_nowait() is None

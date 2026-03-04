@@ -195,10 +195,28 @@ class WorkerRunner:
             await queue.push(frame)
 
     async def _consumer_loop(self, sink: SinkAdapter, queue: BoundedFrameQueue) -> None:
+        frame = None
+        while not self._stop_event.is_set() and frame is None:
+            frame = await queue.pop_latest(timeout_sec=0.5)
+        if frame is None:
+            return
+
+        fps = max(1, self._config.video.fps)
+        frame_interval_sec = 1.0 / float(fps)
+        loop = asyncio.get_running_loop()
+        next_send_at = loop.time()
+
         while not self._stop_event.is_set():
-            frame = await queue.pop(timeout_sec=0.5)
-            if frame is None:
-                continue
+            latest = queue.pop_latest_nowait()
+            if latest is not None:
+                frame = latest
+
+            now = loop.time()
+            delay = next_send_at - now
+            if delay > 0:
+                completed = await sleep_with_cancel(delay, self._stop_event)
+                if not completed:
+                    break
 
             try:
                 await sink.write(frame)
@@ -208,6 +226,12 @@ class WorkerRunner:
                 raise classify_sink_exception(exc) from exc
 
             self._metrics.inc_frames_out(frame_bytes=len(frame.data))
+
+            next_send_at += frame_interval_sec
+            now = loop.time()
+            if now - next_send_at > frame_interval_sec:
+                skipped_ticks = int((now - next_send_at) // frame_interval_sec) + 1
+                next_send_at += skipped_ticks * frame_interval_sec
 
     async def _safe_close(self, *, sink: SinkAdapter, source: SourceAdapter) -> None:
         try:

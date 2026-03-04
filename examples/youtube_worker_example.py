@@ -55,11 +55,11 @@ async def run_youtube_example() -> int:
                 "stream_key_ref": "env:YOUTUBE_STREAM_KEY",
             },
             "video": {
-                "fps": 24,
-                "width": 1280,
-                "height": 720,
+                "fps": 30,
+                "width": 832,
+                "height": 480,
                 "pixel_format": "yuv420p",
-                "bitrate_kbps": 4500,
+                "bitrate_kbps": 1000,
                 "keyframe_interval_sec": 2,
             },
             "audio": {
