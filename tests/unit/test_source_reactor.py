@@ -221,6 +221,46 @@ async def test_bootstrap_prompt_happens_before_start() -> None:
 
 
 @pytest.mark.asyncio
+async def test_supports_injected_reactor_client_instance() -> None:
+    client = FakeClient(ready_after=1, track_after=1)
+    adapter = ReactorSourceAdapter(
+        config=SourceConfig(
+            model_name="livecore",
+            api_key_ref="env:REACTOR_API_KEY",
+        ),
+        video=VideoConfig(width=16, height=16, fps=24, pixel_format="yuv420p", bitrate_kbps=300, keyframe_interval_sec=2),
+        api_key="rk_test",
+        logger=__import__("logging").getLogger(__name__),
+        client=client,
+    )
+
+    info = await adapter.open()
+    frame = await adapter.recv()
+    await adapter.close()
+
+    assert info.width == 16
+    assert isinstance(frame, VideoFrame)
+    assert "connect" in client.calls
+    assert "disconnect" in client.calls
+
+
+def test_rejects_client_and_client_factory_together() -> None:
+    client = FakeClient(ready_after=1, track_after=1)
+    with pytest.raises(ValueError, match="either client or client_factory"):
+        ReactorSourceAdapter(
+            config=SourceConfig(
+                model_name="livecore",
+                api_key_ref="env:REACTOR_API_KEY",
+            ),
+            video=VideoConfig(width=16, height=16, fps=24, pixel_format="yuv420p", bitrate_kbps=300, keyframe_interval_sec=2),
+            api_key="rk_test",
+            logger=__import__("logging").getLogger(__name__),
+            client=client,
+            client_factory=lambda _model, _key: client,
+        )
+
+
+@pytest.mark.asyncio
 async def test_ready_timeout_is_retryable() -> None:
     client = FakeClient(ready_after=999, track_after=1)
     adapter = ReactorSourceAdapter(

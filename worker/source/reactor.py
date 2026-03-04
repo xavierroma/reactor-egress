@@ -22,13 +22,17 @@ class ReactorSourceAdapter:
         video: VideoConfig,
         api_key: str,
         logger: logging.Logger,
+        client: Any | None = None,
         client_factory: Callable[[str, str], Any] | None = None,
     ) -> None:
         self._config = config
         self._video = video
         self._api_key = api_key
         self._logger = logger
+        self._injected_client = client
         self._client_factory = client_factory
+        if self._injected_client is not None and self._client_factory is not None:
+            raise ValueError("Provide either client or client_factory, not both")
 
         self._client: Any | None = None
         self._track: Any | None = None
@@ -87,6 +91,9 @@ class ReactorSourceAdapter:
             self._client = None
 
     def _create_client(self) -> Any:
+        if self._injected_client is not None:
+            return self._injected_client
+
         if self._client_factory is not None:
             return self._client_factory(self._config.model_name, self._api_key)
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
+from typing import Any
 
 from worker.adapters import SinkAdapter, SourceAdapter
 from worker.config import WorkerConfig, resolve_secrets
@@ -25,8 +26,12 @@ class WorkerRunner:
         *,
         source_factory: Callable[[], SourceAdapter] | None = None,
         sink_factory: Callable[[], SinkAdapter] | None = None,
+        reactor_client: Any | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
+        if source_factory is not None and reactor_client is not None:
+            raise ValueError("Provide either source_factory or reactor_client, not both")
+
         self._config = config
         self._secrets = resolve_secrets(config)
 
@@ -39,6 +44,7 @@ class WorkerRunner:
         self._metrics = WorkerMetrics()
         self._source_factory = source_factory or self._default_source_factory
         self._sink_factory = sink_factory or self._default_sink_factory
+        self._reactor_client = reactor_client
 
     @property
     def state(self) -> WorkerState:
@@ -266,6 +272,7 @@ class WorkerRunner:
             video=self._config.video,
             api_key=self._secrets.reactor_api_key,
             logger=self._logger,
+            client=self._reactor_client,
         )
 
     def _default_sink_factory(self) -> SinkAdapter:

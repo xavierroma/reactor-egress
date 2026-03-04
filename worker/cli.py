@@ -4,13 +4,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import logging
-import signal
 import sys
 
-from worker.config import ConfigError, load_config
-from worker.logging_utils import configure_logging
-from worker.runner import WorkerRunner
+from worker.config import ConfigError
+from worker.sdk import EgressWorker
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -24,39 +21,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 async def _run_command(config_path: str) -> int:
     try:
-        config = load_config(config_path)
+        worker = EgressWorker.from_file(config_path)
     except ConfigError as exc:
         print(str(exc), file=sys.stderr)
         return 2
 
-    configure_logging(config.runtime.log_level)
-    logger = logging.getLogger("reactor_egress.worker")
-    runner = WorkerRunner(config=config, logger=logger)
-
-    loop = asyncio.get_running_loop()
-
-    def _on_signal(sig: signal.Signals) -> None:
-        logger.warning(
-            "signal_received",
-            extra={
-                "fields": {
-                    "job_id": config.job.id,
-                    "sink_type": config.sink.type,
-                    "state": runner.state.value,
-                    "attempt": 0,
-                    "signal": sig.name,
-                }
-            },
-        )
-        runner.request_stop(interrupted=True)
-
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, _on_signal, sig)
-        except NotImplementedError:  # pragma: no cover - Windows signal limitation
-            pass
-
-    return await runner.run()
+    return await worker.run(install_signal_handlers=True)
 
 
 def main() -> int:

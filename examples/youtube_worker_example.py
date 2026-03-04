@@ -1,4 +1,4 @@
-"""Programmatic example: use WorkerRunner to publish Reactor output to YouTube Live.
+"""Programmatic example: use EgressWorker to publish Reactor output to YouTube Live.
 
 This module intentionally avoids argparse/CLI parsing. Import `run_youtube_example`
 from your own app code and execute it inside an asyncio event loop.
@@ -7,13 +7,10 @@ from your own app code and execute it inside an asyncio event loop.
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
-import signal
 
+from worker import EgressWorker
 from worker.config import WorkerConfig
-from worker.logging_utils import configure_logging
-from worker.runner import WorkerRunner
 
 # Required env vars:
 # - REACTOR_API_KEY
@@ -80,22 +77,9 @@ async def run_youtube_example() -> int:
         }
     )
 
-    configure_logging(config.runtime.log_level)
-    logger = logging.getLogger("reactor_egress.youtube_example")
-    runner = WorkerRunner(config=config, logger=logger)
+    worker = EgressWorker.from_config(config)
+    return await worker.run(install_signal_handlers=True)
 
-    loop = asyncio.get_running_loop()
-
-    def _stop(_sig: signal.Signals) -> None:
-        runner.request_stop(interrupted=True)
-
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, _stop, sig)
-        except NotImplementedError:  # pragma: no cover
-            pass
-
-    return await runner.run()
 
 if __name__ == "__main__":
     raise SystemExit(asyncio.run(run_youtube_example()))
