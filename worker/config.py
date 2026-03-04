@@ -1,24 +1,68 @@
-"""Configuration schema and loading."""
+"""Configuration schema and validation."""
 
 from __future__ import annotations
 
-import json
 import os
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, NotRequired, TypedDict, TypeAlias
 
-import yaml
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 
 class ConfigError(Exception):
     """Raised for invalid runtime config."""
 
 
-class BootstrapConfig(BaseModel):
-    start_prompt: str | None = None
-    auto_start: bool = True
+class JobConfigDict(TypedDict):
+    id: str
+    name: str
+
+
+class SourceConfigDict(TypedDict):
+    type: Literal["reactor"]
+
+
+class SinkConfigDict(TypedDict):
+    type: Literal["rtmp"]
+    url: str
+    stream_key_ref: NotRequired[str]
+
+
+class VideoConfigDict(TypedDict):
+    fps: int
+    width: int
+    height: int
+    pixel_format: Literal["yuv420p", "rgb24"]
+    bitrate_kbps: int
+    keyframe_interval_sec: int
+
+
+class AudioConfigDict(TypedDict, total=False):
+    inject_silence: bool
+    sample_rate: int
+    channels: int
+
+
+class RetryConfigDict(TypedDict, total=False):
+    max_attempts: int
+    base_backoff_sec: float
+    max_backoff_sec: float
+    jitter_ratio: float
+
+
+class RuntimeConfigDict(TypedDict, total=False):
+    frame_queue_size: int
+    log_level: Literal["debug", "info", "warning", "error"]
+
+
+class WorkerConfigDict(TypedDict):
+    job: JobConfigDict
+    source: SourceConfigDict
+    sink: SinkConfigDict
+    video: VideoConfigDict
+    audio: NotRequired[AudioConfigDict]
+    retry: NotRequired[RetryConfigDict]
+    runtime: NotRequired[RuntimeConfigDict]
 
 
 class JobConfig(BaseModel):
@@ -27,12 +71,9 @@ class JobConfig(BaseModel):
 
 
 class SourceConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     type: Literal["reactor"] = "reactor"
-    model_name: str = Field(min_length=1)
-    api_key_ref: str = Field(min_length=5)
-    track_timeout_sec: int = Field(default=30, ge=1, le=600)
-    ready_timeout_sec: int = Field(default=30, ge=1, le=600)
-    bootstrap: BootstrapConfig = Field(default_factory=BootstrapConfig)
 
 
 class SinkConfig(BaseModel):
@@ -85,45 +126,25 @@ class WorkerConfig(BaseModel):
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
 
 
+WorkerConfigInput: TypeAlias = WorkerConfig | WorkerConfigDict
+
+
 @dataclass(frozen=True, slots=True)
 class ResolvedSecrets:
-    reactor_api_key: str
     sink_url_with_key: str
 
 
-def load_config(path: str | Path) -> WorkerConfig:
-    file_path = Path(path)
-    try:
-        text = file_path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise ConfigError(f"Failed to read config file: {file_path}") from exc
+def load_config(config: WorkerConfigInput) -> WorkerConfig:
+    if isinstance(config, WorkerConfig):
+        return config
 
-    try:
-        raw = _parse_config_text(text, file_path.suffix.lower())
-        return WorkerConfig.model_validate(raw)
-    except ValidationError as exc:
-        raise ConfigError(f"Config validation failed: {exc}") from exc
-    except (json.JSONDecodeError, yaml.YAMLError, ValueError) as exc:
-        raise ConfigError(f"Config parse failed: {exc}") from exc
+    if isinstance(config, dict):
+        try:
+            return WorkerConfig.model_validate(config)
+        except ValidationError as exc:
+            raise ConfigError(f"Config validation failed: {exc}") from exc
 
-
-def _parse_config_text(text: str, suffix: str) -> dict[str, Any]:
-    if suffix == ".json":
-        return json.loads(text)
-    if suffix in {".yaml", ".yml"}:
-        data = yaml.safe_load(text)
-        if not isinstance(data, dict):
-            raise ValueError("YAML root must be a map/object")
-        return data
-
-    data = yaml.safe_load(text)
-    if isinstance(data, dict):
-        return data
-
-    fallback = json.loads(text)
-    if not isinstance(fallback, dict):
-        raise ValueError("Config root must be a map/object")
-    return fallback
+    raise TypeError("config must be a WorkerConfig or WorkerConfigDict")
 
 
 def resolve_secret_ref(ref: str) -> str:
@@ -137,14 +158,12 @@ def resolve_secret_ref(ref: str) -> str:
 
 
 def resolve_secrets(config: WorkerConfig) -> ResolvedSecrets:
-    api_key = resolve_secret_ref(config.source.api_key_ref)
-
     sink_url = config.sink.url
     if config.sink.stream_key_ref:
         stream_key = resolve_secret_ref(config.sink.stream_key_ref)
         sink_url = _append_stream_key(sink_url, stream_key)
 
-    return ResolvedSecrets(reactor_api_key=api_key, sink_url_with_key=sink_url)
+    return ResolvedSecrets(sink_url_with_key=sink_url)
 
 
 def _append_stream_key(url: str, stream_key: str) -> str:

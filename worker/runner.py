@@ -31,6 +31,8 @@ class WorkerRunner:
     ) -> None:
         if source_factory is not None and reactor_client is not None:
             raise ValueError("Provide either source_factory or reactor_client, not both")
+        if source_factory is None and config.source.type == "reactor" and reactor_client is None:
+            raise ValueError("reactor_client is required when source.type is reactor")
 
         self._config = config
         self._secrets = resolve_secrets(config)
@@ -267,10 +269,10 @@ class WorkerRunner:
         }
 
     def _default_source_factory(self) -> SourceAdapter:
+        if self._reactor_client is None:
+            raise ValueError("reactor_client is required when source.type is reactor")
         return ReactorSourceAdapter(
-            config=self._config.source,
             video=self._config.video,
-            api_key=self._secrets.reactor_api_key,
             logger=self._logger,
             client=self._reactor_client,
         )

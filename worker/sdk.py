@@ -5,36 +5,21 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
-from collections.abc import Callable, Mapping
-from pathlib import Path
+from collections.abc import Callable
 from typing import Any, TypeAlias
 
-from pydantic import ValidationError
-
 from worker.adapters import SinkAdapter, SourceAdapter
-from worker.config import ConfigError, WorkerConfig, load_config
+from worker.config import WorkerConfig, WorkerConfigInput, load_config
 from worker.logging_utils import configure_logging
 from worker.models import WorkerState
 from worker.runner import WorkerRunner
 
-ConfigInput: TypeAlias = WorkerConfig | str | Path | Mapping[str, Any]
+ConfigInput: TypeAlias = WorkerConfigInput
 
 
 def normalize_config(config: ConfigInput) -> WorkerConfig:
-    """Load and validate config from an object, mapping, or config file path."""
-    if isinstance(config, WorkerConfig):
-        return config
-
-    if isinstance(config, (str, Path)):
-        return load_config(config)
-
-    if isinstance(config, Mapping):
-        try:
-            return WorkerConfig.model_validate(dict(config))
-        except ValidationError as exc:
-            raise ConfigError(f"Config validation failed: {exc}") from exc
-
-    raise TypeError("config must be a WorkerConfig, path-like value, or mapping")
+    """Validate and normalize a typed Python config dict into WorkerConfig."""
+    return load_config(config)
 
 
 class EgressWorker:
@@ -50,6 +35,9 @@ class EgressWorker:
         logger: logging.Logger | None = None,
         configure_root_logger: bool = True,
     ) -> None:
+        if source_factory is None and config.source.type == "reactor" and reactor_client is None:
+            raise ValueError("reactor_client is required when source.type is reactor")
+
         self._config = config
         if configure_root_logger:
             configure_logging(config.runtime.log_level)
@@ -76,26 +64,6 @@ class EgressWorker:
     ) -> EgressWorker:
         return cls(
             normalize_config(config),
-            source_factory=source_factory,
-            sink_factory=sink_factory,
-            reactor_client=reactor_client,
-            logger=logger,
-            configure_root_logger=configure_root_logger,
-        )
-
-    @classmethod
-    def from_file(
-        cls,
-        path: str | Path,
-        *,
-        source_factory: Callable[[], SourceAdapter] | None = None,
-        sink_factory: Callable[[], SinkAdapter] | None = None,
-        reactor_client: Any | None = None,
-        logger: logging.Logger | None = None,
-        configure_root_logger: bool = True,
-    ) -> EgressWorker:
-        return cls(
-            load_config(path),
             source_factory=source_factory,
             sink_factory=sink_factory,
             reactor_client=reactor_client,

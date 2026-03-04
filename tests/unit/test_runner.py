@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from pathlib import Path
 
 import pytest
 
@@ -56,33 +55,25 @@ class CountingSink(FakeSink):
         await asyncio.sleep(0)
 
 
+def _base_config(job_id: str) -> dict[str, object]:
+    return {
+        "job": {"id": job_id, "name": "demo"},
+        "source": {"type": "reactor"},
+        "sink": {"type": "rtmp", "url": "rtmp://localhost/live"},
+        "video": {
+            "fps": 24,
+            "width": 16,
+            "height": 16,
+            "pixel_format": "yuv420p",
+            "bitrate_kbps": 300,
+            "keyframe_interval_sec": 2,
+        },
+    }
+
+
 @pytest.mark.asyncio
-async def test_runner_returns_130_on_interrupt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("REACTOR_API_KEY", "rk_test")
-    cfg_file = tmp_path / "cfg.yaml"
-    cfg_file.write_text(
-        """
-job:
-  id: job_1
-  name: demo
-source:
-  type: reactor
-  model_name: livecore
-  api_key_ref: env:REACTOR_API_KEY
-sink:
-  type: rtmp
-  url: rtmp://localhost/live
-video:
-  fps: 24
-  width: 16
-  height: 16
-  pixel_format: yuv420p
-  bitrate_kbps: 300
-  keyframe_interval_sec: 2
-""",
-        encoding="utf-8",
-    )
-    cfg = load_config(cfg_file)
+async def test_runner_returns_130_on_interrupt() -> None:
+    cfg = load_config(_base_config("job_1"))
 
     source = FakeSource()
     sink = FakeSink()
@@ -105,36 +96,18 @@ video:
 
 
 @pytest.mark.asyncio
-async def test_runner_consumer_paces_and_drops_when_source_is_faster(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("REACTOR_API_KEY", "rk_test")
-    cfg_file = tmp_path / "cfg.yaml"
-    cfg_file.write_text(
-        """
-job:
-  id: job_2
-  name: demo
-source:
-  type: reactor
-  model_name: livecore
-  api_key_ref: env:REACTOR_API_KEY
-sink:
-  type: rtmp
-  url: rtmp://localhost/live
-video:
-  fps: 10
-  width: 16
-  height: 16
-  pixel_format: yuv420p
-  bitrate_kbps: 300
-  keyframe_interval_sec: 2
-runtime:
-  frame_queue_size: 2
-""",
-        encoding="utf-8",
-    )
-    cfg = load_config(cfg_file)
+async def test_runner_consumer_paces_and_drops_when_source_is_faster() -> None:
+    cfg_dict = _base_config("job_2")
+    cfg_dict["video"] = {
+        "fps": 10,
+        "width": 16,
+        "height": 16,
+        "pixel_format": "yuv420p",
+        "bitrate_kbps": 300,
+        "keyframe_interval_sec": 2,
+    }
+    cfg_dict["runtime"] = {"frame_queue_size": 2}
+    cfg = load_config(cfg_dict)
 
     source = FastSource()
     sink = CountingSink()

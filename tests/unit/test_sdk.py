@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from pathlib import Path
 
 import pytest
 
@@ -63,18 +62,15 @@ class FakeInjectedClient:
     async def connect(self) -> None:
         self.calls.append("connect")
 
-    def status(self) -> str:
-        return "READY"
-
     async def start(self) -> None:
         self.calls.append("start")
 
-    async def get_remote_track(self) -> FakeFailingTrack:
-        self.calls.append("get_remote_track")
-        return FakeFailingTrack()
-
     async def disconnect(self) -> None:
         self.calls.append("disconnect")
+
+    async def get_remote_tracks(self) -> dict[str, object]:
+        self.calls.append("get_remote_tracks")
+        return {"video-main": FakeFailingTrack()}
 
 
 def _config_mapping() -> dict[str, object]:
@@ -82,8 +78,6 @@ def _config_mapping() -> dict[str, object]:
         "job": {"id": "job_sdk", "name": "sdk"},
         "source": {
             "type": "reactor",
-            "model_name": "livecore",
-            "api_key_ref": "env:REACTOR_API_KEY",
         },
         "sink": {
             "type": "rtmp",
@@ -101,36 +95,11 @@ def _config_mapping() -> dict[str, object]:
 
 
 @pytest.mark.asyncio
-async def test_egress_worker_from_file_runs_and_stops(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("REACTOR_API_KEY", "rk_test")
-    cfg_file = tmp_path / "cfg.yaml"
-    cfg_file.write_text(
-        """
-job:
-  id: job_sdk
-  name: sdk
-source:
-  type: reactor
-  model_name: livecore
-  api_key_ref: env:REACTOR_API_KEY
-sink:
-  type: rtmp
-  url: rtmp://localhost/live
-video:
-  fps: 24
-  width: 16
-  height: 16
-  pixel_format: yuv420p
-  bitrate_kbps: 300
-  keyframe_interval_sec: 2
-""",
-        encoding="utf-8",
-    )
-
+async def test_egress_worker_from_config_runs_and_stops() -> None:
     source = FakeSource()
     sink = FakeSink()
-    worker = EgressWorker.from_file(
-        cfg_file,
+    worker = EgressWorker.from_config(
+        _config_mapping(),
         source_factory=lambda: source,
         sink_factory=lambda: sink,
         logger=logging.getLogger(__name__),
@@ -149,9 +118,7 @@ video:
 
 
 @pytest.mark.asyncio
-async def test_run_egress_accepts_mapping_config(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("REACTOR_API_KEY", "rk_test")
-
+async def test_run_egress_accepts_mapping_config() -> None:
     source = FailingSource()
     sink = FakeSink()
     exit_code = await run_egress(
@@ -168,8 +135,7 @@ async def test_run_egress_accepts_mapping_config(monkeypatch: pytest.MonkeyPatch
 
 
 @pytest.mark.asyncio
-async def test_run_egress_uses_injected_reactor_client(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("REACTOR_API_KEY", "rk_test")
+async def test_run_egress_uses_injected_reactor_client_without_lifecycle_calls() -> None:
     client = FakeInjectedClient()
 
     exit_code = await run_egress(
@@ -180,13 +146,21 @@ async def test_run_egress_uses_injected_reactor_client(monkeypatch: pytest.Monke
     )
 
     assert exit_code == 1
-    assert "connect" in client.calls
-    assert "get_remote_track" in client.calls
-    assert "disconnect" in client.calls
+    assert "get_remote_tracks" in client.calls
+    assert "connect" not in client.calls
+    assert "start" not in client.calls
+    assert "disconnect" not in client.calls
 
 
-def test_rejects_source_factory_and_reactor_client_together(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("REACTOR_API_KEY", "rk_test")
+def test_reactor_client_required_without_source_factory() -> None:
+    with pytest.raises(ValueError, match="reactor_client is required"):
+        EgressWorker.from_config(
+            _config_mapping(),
+            configure_root_logger=False,
+        )
+
+
+def test_rejects_source_factory_and_reactor_client_together() -> None:
     client = FakeInjectedClient()
     with pytest.raises(ValueError, match="either source_factory or reactor_client"):
         EgressWorker.from_config(
@@ -198,5 +172,5 @@ def test_rejects_source_factory_and_reactor_client_together(monkeypatch: pytest.
 
 
 def test_normalize_config_rejects_invalid_type() -> None:
-    with pytest.raises(TypeError, match="config must be"):
-        normalize_config(123)  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="WorkerConfig or WorkerConfigDict"):
+        normalize_config("config.yaml")  # type: ignore[arg-type]
