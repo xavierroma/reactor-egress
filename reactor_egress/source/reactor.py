@@ -4,87 +4,73 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-import inspect
 import logging
 import time
-from typing import Any
+from typing import cast
 
-from worker.config import VideoConfig
-from worker.errors import RetryableError, TerminalError, WorkerError, classify_source_exception
-from worker.models import SourceInfo, VideoFrame
+from aiortc import MediaStreamTrack
+from reactor_sdk import Reactor
+
+from reactor_egress.errors import ConfigError, SourceError
+from reactor_egress.types import SourceInfo, VideoFrame, VideoOptions
 
 
-class ReactorSourceAdapter:
+class ReactorSource:
     def __init__(
         self,
-        *,
-        video: VideoConfig,
-        logger: logging.Logger,
-        client: Any,
+        reactor_client: Reactor,
+        video: VideoOptions,
+        logger: logging.Logger | None = None,
     ) -> None:
-        if client is None:
-            raise ValueError("client is required for ReactorSourceAdapter")
+        if reactor_client is None:
+            raise ConfigError("reactor_client is required")
 
         self._video = video
-        self._logger = logger
-        self._injected_client = client
+        self._logger = logger or logging.getLogger("reactor_egress.source.reactor")
+        self._client = reactor_client
 
-        self._client: Any | None = None
-        self._track: Any | None = None
+        self._track: MediaStreamTrack | None = None
         self._prefetched_frames: deque[VideoFrame] = deque()
 
     async def open(self) -> SourceInfo:
         try:
-            self._client = self._injected_client
             self._track = await self._wait_for_track()
             source_info = self._derive_source_info(self._track)
-            source_info = await self._probe_source_info_from_frame(source_info)
-            return source_info
-        except WorkerError:
+            return await self._probe_source_info_from_frame(source_info)
+        except (ConfigError, SourceError):
             raise
-        except Exception as exc:
-            raise classify_source_exception(exc) from exc
+        except Exception as exc:  # pragma: no cover - defensive mapping
+            raise SourceError(f"failed to open reactor source: {exc}") from exc
 
     async def recv(self) -> VideoFrame:
         if self._track is None:
-            raise TerminalError("source_track_unavailable", "Reactor track is not available")
+            raise SourceError("reactor source is not open")
         if self._prefetched_frames:
             return self._prefetched_frames.popleft()
+
         try:
-            raw_frame = await _maybe_await(self._track.recv())
+            raw_frame = await self._track.recv()
             return self._to_video_frame(raw_frame)
-        except WorkerError:
+        except (ConfigError, SourceError):
             raise
         except Exception as exc:
-            raise classify_source_exception(exc) from exc
+            raise SourceError(f"failed to read reactor frame: {exc}") from exc
 
     async def close(self) -> None:
-        # The Reactor client lifecycle is owned by the caller.
         self._track = None
         self._prefetched_frames.clear()
-        self._client = None
 
-    async def _wait_for_track(self) -> Any:
-        if self._client is None:
-            raise TerminalError("source_client_missing", "Reactor client missing")
-
+    async def _wait_for_track(self) -> MediaStreamTrack:
         get_tracks = getattr(self._client, "get_remote_tracks", None)
         if not callable(get_tracks):
-            raise TerminalError(
-                "source_track_api_missing",
-                "Reactor client missing get_remote_tracks()",
-            )
-
-        tracks = await _maybe_await(get_tracks())
+            raise ConfigError("reactor_client must expose get_remote_tracks()")
+        tracks = cast(dict[str, MediaStreamTrack], get_tracks())
         track = _select_remote_track(tracks)
         if track is None:
-            raise RetryableError(
-                "source_track_unavailable",
-                "No remote video track available from Reactor client",
-            )
+            raise SourceError("no remote video track available from reactor_client")
         return track
 
-    def _derive_source_info(self, track: Any) -> SourceInfo:
+    def _derive_source_info(self, track: MediaStreamTrack) -> SourceInfo:
         width = int(getattr(track, "width", self._video.width))
         height = int(getattr(track, "height", self._video.height))
         fps = int(getattr(track, "fps", self._video.fps))
@@ -102,9 +88,8 @@ class ReactorSourceAdapter:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
-
             try:
-                raw_frame = await asyncio.wait_for(_maybe_await(self._track.recv()), timeout=remaining)
+                raw_frame = await asyncio.wait_for(self._track.recv(), timeout=remaining)
             except asyncio.TimeoutError:
                 break
 
@@ -113,7 +98,7 @@ class ReactorSourceAdapter:
             observed = frame
 
         if observed is None:
-            self._logger.warning("Timed out probing initial Reactor frames; using default source info")
+            self._logger.warning("timed out probing initial Reactor frames; using metadata defaults")
             return base
 
         return SourceInfo(
@@ -123,7 +108,7 @@ class ReactorSourceAdapter:
             pixel_format=observed.pixel_format,
         )
 
-    def _to_video_frame(self, raw_frame: Any) -> VideoFrame:
+    def _to_video_frame(self, raw_frame: object) -> VideoFrame:
         if isinstance(raw_frame, VideoFrame):
             return raw_frame
 
@@ -143,13 +128,7 @@ class ReactorSourceAdapter:
         return VideoFrame(data=data, width=width, height=height, pixel_format=pixel_format, pts_ms=pts_ms)
 
 
-async def _maybe_await(value: Any) -> Any:
-    if inspect.isawaitable(value):
-        return await value
-    return value
-
-
-def _coerce_frame_data(raw_frame: Any, *, target_format: str) -> tuple[bytes, str | None]:
+def _coerce_frame_data(raw_frame: object, *, target_format: str) -> tuple[bytes, str | None]:
     if isinstance(raw_frame, (bytes, bytearray, memoryview)):
         return bytes(raw_frame), None
 
@@ -173,10 +152,10 @@ def _coerce_frame_data(raw_frame: Any, *, target_format: str) -> tuple[bytes, st
         if callable(tobytes):
             return bytes(tobytes()), target_format
 
-    raise TerminalError("source_frame_decode_error", "Unable to extract raw bytes from Reactor frame")
+    raise SourceError("unable to extract raw bytes from Reactor frame")
 
 
-def _coerce_pixel_format(value: Any) -> str:
+def _coerce_pixel_format(value: object) -> str:
     if isinstance(value, str):
         return value
     name = getattr(value, "name", None)
@@ -185,30 +164,14 @@ def _coerce_pixel_format(value: Any) -> str:
     return str(value)
 
 
-def _select_remote_track(tracks: Any) -> Any | None:
-    if tracks is None:
-        return None
-
-    candidates: list[Any]
-    if isinstance(tracks, dict):
-        candidates = list(tracks.values())
-    elif isinstance(tracks, (list, tuple, set)):
-        candidates = list(tracks)
-    else:
-        candidates = [tracks]
-
-    for track in candidates:
+def _select_remote_track(tracks: dict[str, MediaStreamTrack]) -> MediaStreamTrack | None:
+    for track in tracks.values():
         if _is_video_track(track):
             return track
     return None
 
 
-def _is_video_track(track: Any) -> bool:
-    if track is None:
-        return False
-    recv = getattr(track, "recv", None)
-    if not callable(recv):
-        return False
+def _is_video_track(track: MediaStreamTrack) -> bool:
     kind = getattr(track, "kind", None)
     if isinstance(kind, str):
         return kind.lower() == "video"

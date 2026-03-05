@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 
 import pytest
 
-from worker.config import VideoConfig
-from worker.errors import RetryableError, TerminalError
-from worker.models import VideoFrame
-from worker.source.reactor import ReactorSourceAdapter
+from reactor_egress import ConfigError, ReactorSource, SourceError, VideoFrame, VideoOptions
 
 
 @dataclass
@@ -68,7 +66,7 @@ class FakeClient:
     async def disconnect(self) -> None:
         self.calls.append("disconnect")
 
-    async def get_remote_tracks(self) -> object:
+    def get_remote_tracks(self) -> object:
         self.calls.append("get_remote_tracks")
         return self._tracks
 
@@ -80,15 +78,15 @@ class FakeClientMissingTracksApi:
 @pytest.mark.asyncio
 async def test_uses_video_track_from_get_remote_tracks() -> None:
     client = FakeClient({"audio-main": FakeAudioTrack(), "video-main": FakeTrack()})
-    adapter = ReactorSourceAdapter(
-        video=VideoConfig(width=16, height=16, fps=24, pixel_format="yuv420p", bitrate_kbps=300, keyframe_interval_sec=2),
-        logger=__import__("logging").getLogger(__name__),
-        client=client,
+    source = ReactorSource(
+        reactor_client=client,
+        video=VideoOptions(width=16, height=16, fps=24, pixel_format="yuv420p", bitrate_kbps=300, keyframe_interval_sec=2),
+        logger=logging.getLogger(__name__),
     )
 
-    info = await adapter.open()
-    frame = await adapter.recv()
-    await adapter.close()
+    info = await source.open()
+    frame = await source.recv()
+    await source.close()
 
     assert info.width == 16
     assert isinstance(frame, VideoFrame)
@@ -99,51 +97,51 @@ async def test_uses_video_track_from_get_remote_tracks() -> None:
 
 
 @pytest.mark.asyncio
-async def test_no_remote_video_track_is_retryable() -> None:
+async def test_no_remote_video_track_raises_source_error() -> None:
     client = FakeClient({"audio-main": FakeAudioTrack()})
-    adapter = ReactorSourceAdapter(
-        video=VideoConfig(width=16, height=16, fps=24, pixel_format="yuv420p", bitrate_kbps=300, keyframe_interval_sec=2),
-        logger=__import__("logging").getLogger(__name__),
-        client=client,
+    source = ReactorSource(
+        reactor_client=client,
+        video=VideoOptions(width=16, height=16, fps=24, pixel_format="yuv420p", bitrate_kbps=300, keyframe_interval_sec=2),
+        logger=logging.getLogger(__name__),
     )
 
-    with pytest.raises(RetryableError, match="source_track_unavailable"):
-        await adapter.open()
+    with pytest.raises(SourceError, match="no remote video track"):
+        await source.open()
 
 
 @pytest.mark.asyncio
-async def test_missing_get_remote_tracks_is_terminal() -> None:
-    adapter = ReactorSourceAdapter(
-        video=VideoConfig(width=16, height=16, fps=24, pixel_format="yuv420p", bitrate_kbps=300, keyframe_interval_sec=2),
-        logger=__import__("logging").getLogger(__name__),
-        client=FakeClientMissingTracksApi(),
+async def test_missing_get_remote_tracks_raises_config_error() -> None:
+    source = ReactorSource(
+        reactor_client=FakeClientMissingTracksApi(),
+        video=VideoOptions(width=16, height=16, fps=24, pixel_format="yuv420p", bitrate_kbps=300, keyframe_interval_sec=2),
+        logger=logging.getLogger(__name__),
     )
 
-    with pytest.raises(TerminalError, match="source_track_api_missing"):
-        await adapter.open()
+    with pytest.raises(ConfigError, match="get_remote_tracks"):
+        await source.open()
 
 
 def test_client_is_required() -> None:
-    with pytest.raises(ValueError, match="client is required"):
-        ReactorSourceAdapter(
-            video=VideoConfig(width=16, height=16, fps=24, pixel_format="yuv420p", bitrate_kbps=300, keyframe_interval_sec=2),
-            logger=__import__("logging").getLogger(__name__),
-            client=None,
+    with pytest.raises(ConfigError, match="reactor_client is required"):
+        ReactorSource(
+            reactor_client=None,
+            video=VideoOptions(width=16, height=16, fps=24, pixel_format="yuv420p", bitrate_kbps=300, keyframe_interval_sec=2),
+            logger=logging.getLogger(__name__),
         )
 
 
 @pytest.mark.asyncio
 async def test_probes_first_frame_when_track_has_no_metadata() -> None:
     client = FakeClient({"video-main": FakeTrackNoMetadata()})
-    adapter = ReactorSourceAdapter(
-        video=VideoConfig(width=16, height=16, fps=24, pixel_format="yuv420p", bitrate_kbps=300, keyframe_interval_sec=2),
-        logger=__import__("logging").getLogger(__name__),
-        client=client,
+    source = ReactorSource(
+        reactor_client=client,
+        video=VideoOptions(width=16, height=16, fps=24, pixel_format="yuv420p", bitrate_kbps=300, keyframe_interval_sec=2),
+        logger=logging.getLogger(__name__),
     )
 
-    info = await adapter.open()
-    frame = await adapter.recv()
-    await adapter.close()
+    info = await source.open()
+    frame = await source.recv()
+    await source.close()
 
     assert info.width == 32
     assert info.height == 24
@@ -154,15 +152,15 @@ async def test_probes_first_frame_when_track_has_no_metadata() -> None:
 @pytest.mark.asyncio
 async def test_first_frame_overrides_mismatched_track_metadata() -> None:
     client = FakeClient({"video-main": FakeTrackMismatchedMetadata()})
-    adapter = ReactorSourceAdapter(
-        video=VideoConfig(width=16, height=16, fps=24, pixel_format="yuv420p", bitrate_kbps=300, keyframe_interval_sec=2),
-        logger=__import__("logging").getLogger(__name__),
-        client=client,
+    source = ReactorSource(
+        reactor_client=client,
+        video=VideoOptions(width=16, height=16, fps=24, pixel_format="yuv420p", bitrate_kbps=300, keyframe_interval_sec=2),
+        logger=logging.getLogger(__name__),
     )
 
-    info = await adapter.open()
-    frame = await adapter.recv()
-    await adapter.close()
+    info = await source.open()
+    frame = await source.recv()
+    await source.close()
 
     assert info.width == 32
     assert info.height == 24

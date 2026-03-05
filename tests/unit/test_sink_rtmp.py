@@ -5,10 +5,7 @@ import logging
 
 import pytest
 
-from worker.config import AudioConfig, SinkConfig, VideoConfig
-from worker.errors import RetryableError, TerminalError
-from worker.models import SourceInfo, VideoFrame
-from worker.sink.rtmp import RtmpSinkAdapter
+from reactor_egress import AudioOptions, ConfigError, RtmpSink, RtmpTarget, SinkError, SourceInfo, VideoFrame, VideoOptions
 
 
 class _BrokenPipeWriter:
@@ -41,8 +38,8 @@ class _FakeProc:
         return 0
 
 
-def _video_cfg() -> VideoConfig:
-    return VideoConfig(
+def _video_options() -> VideoOptions:
+    return VideoOptions(
         fps=24,
         width=16,
         height=16,
@@ -52,17 +49,21 @@ def _video_cfg() -> VideoConfig:
     )
 
 
-def _audio_cfg() -> AudioConfig:
-    return AudioConfig(inject_silence=True, sample_rate=48000, channels=2)
+def _audio_options() -> AudioOptions:
+    return AudioOptions(inject_silence=True, sample_rate=48000, channels=2)
+
+
+def _target() -> RtmpTarget:
+    return RtmpTarget(url="rtmp://localhost/live", stream_key="abc")
 
 
 def test_build_ffmpeg_cmd_contains_expected_flags() -> None:
-    video = _video_cfg()
-    cmd = RtmpSinkAdapter.build_ffmpeg_cmd(
+    video = _video_options()
+    cmd = RtmpSink.build_ffmpeg_cmd(
         ffmpeg_path="ffmpeg",
         output_url="rtmp://localhost/live/abc",
         video=video,
-        audio=_audio_cfg(),
+        audio=_audio_options(),
     )
 
     assert "-c:v" in cmd
@@ -78,7 +79,7 @@ def test_build_ffmpeg_cmd_contains_expected_flags() -> None:
 
 
 def test_build_ffmpeg_cmd_uses_source_input_and_target_output() -> None:
-    video = VideoConfig(
+    video = VideoOptions(
         fps=24,
         width=1280,
         height=720,
@@ -87,11 +88,11 @@ def test_build_ffmpeg_cmd_uses_source_input_and_target_output() -> None:
         keyframe_interval_sec=2,
     )
     source = SourceInfo(width=832, height=480, fps=30, pixel_format="yuv420p")
-    cmd = RtmpSinkAdapter.build_ffmpeg_cmd(
+    cmd = RtmpSink.build_ffmpeg_cmd(
         ffmpeg_path="ffmpeg",
         output_url="rtmp://localhost/live/abc",
         video=video,
-        audio=_audio_cfg(),
+        audio=_audio_options(),
         source=source,
     )
 
@@ -107,33 +108,31 @@ def test_build_ffmpeg_cmd_uses_source_input_and_target_output() -> None:
 
 @pytest.mark.asyncio
 async def test_open_fails_when_ffmpeg_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("worker.sink.rtmp.shutil.which", lambda _name: None)
+    monkeypatch.setattr("reactor_egress.sink.rtmp.shutil.which", lambda _name: None)
 
-    sink = RtmpSinkAdapter(
-        config=SinkConfig(url="rtmp://localhost/live"),
-        video=_video_cfg(),
-        audio=_audio_cfg(),
-        output_url="rtmp://localhost/live/abc",
+    sink = RtmpSink(
+        target=_target(),
+        video=_video_options(),
+        audio=_audio_options(),
         logger=logging.getLogger(__name__),
     )
 
-    with pytest.raises(TerminalError, match="sink_ffmpeg_missing"):
+    with pytest.raises(ConfigError, match="ffmpeg"):
         await sink.open(SourceInfo(width=16, height=16, fps=24, pixel_format="yuv420p"))
 
 
 @pytest.mark.asyncio
-async def test_write_broken_pipe_is_retryable() -> None:
-    sink = RtmpSinkAdapter(
-        config=SinkConfig(url="rtmp://localhost/live"),
-        video=_video_cfg(),
-        audio=_audio_cfg(),
-        output_url="rtmp://localhost/live/abc",
+async def test_write_broken_pipe_raises_sink_error() -> None:
+    sink = RtmpSink(
+        target=_target(),
+        video=_video_options(),
+        audio=_audio_options(),
         logger=logging.getLogger(__name__),
     )
     sink._proc = _FakeProc()  # noqa: SLF001 - white-box adapter test
 
     frame = VideoFrame(data=b"a" * 384, width=16, height=16, pixel_format="yuv420p")
-    with pytest.raises(RetryableError, match="sink_broken_pipe"):
+    with pytest.raises(SinkError, match="pipe failed"):
         await sink.write(frame)
 
 
@@ -177,11 +176,10 @@ async def test_close_kills_when_wait_times_out() -> None:
 
     proc.kill = _kill  # type: ignore[assignment]
 
-    sink = RtmpSinkAdapter(
-        config=SinkConfig(url="rtmp://localhost/live"),
-        video=_video_cfg(),
-        audio=_audio_cfg(),
-        output_url="rtmp://localhost/live/abc",
+    sink = RtmpSink(
+        target=_target(),
+        video=_video_options(),
+        audio=_audio_options(),
         logger=logging.getLogger(__name__),
     )
     sink._proc = proc  # noqa: SLF001
@@ -191,7 +189,7 @@ async def test_close_kills_when_wait_times_out() -> None:
 
 
 def test_validate_frame_accepts_source_dimensions() -> None:
-    video = VideoConfig(
+    video = VideoOptions(
         fps=24,
         width=1280,
         height=720,
@@ -199,11 +197,10 @@ def test_validate_frame_accepts_source_dimensions() -> None:
         bitrate_kbps=300,
         keyframe_interval_sec=2,
     )
-    sink = RtmpSinkAdapter(
-        config=SinkConfig(url="rtmp://localhost/live"),
+    sink = RtmpSink(
+        target=_target(),
         video=video,
-        audio=_audio_cfg(),
-        output_url="rtmp://localhost/live/abc",
+        audio=_audio_options(),
         logger=logging.getLogger(__name__),
     )
     sink._source_info = SourceInfo(width=832, height=480, fps=24, pixel_format="yuv420p")  # noqa: SLF001
@@ -211,3 +208,17 @@ def test_validate_frame_accepts_source_dimensions() -> None:
     frame = VideoFrame(data=b"a" * payload_len, width=832, height=480, pixel_format="yuv420p")
 
     sink._validate_frame(frame)  # noqa: SLF001
+
+
+def test_validate_frame_is_fail_fast_on_mismatch() -> None:
+    sink = RtmpSink(
+        target=_target(),
+        video=_video_options(),
+        audio=_audio_options(),
+        logger=logging.getLogger(__name__),
+    )
+    sink._source_info = SourceInfo(width=16, height=16, fps=24, pixel_format="yuv420p")  # noqa: SLF001
+
+    bad_frame = VideoFrame(data=b"a" * 384, width=16, height=16, pixel_format="rgb24")
+    with pytest.raises(SinkError, match="pixel format"):
+        sink._validate_frame(bad_frame)  # noqa: SLF001
