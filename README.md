@@ -1,46 +1,97 @@
-# Reactor Egress Worker
+# Reactor Egress
 
-RTMP egress worker for Reactor video streams.
+Deploy-anywhere Python library for Reactor source egress.
 
-## SDK-Only Reactor Source
+This package is source-only for `reactor-sdk` and currently provides an RTMP sink.
+You decide where and how to run it (server, worker system, local process, container, etc.).
 
-This is an SDK package (not a standalone worker process). Reactor source requires an already initialized Reactor client. The worker only reads tracks via `get_remote_tracks()`.
+## Install
 
-## Typed Python Dict Config
+```bash
+pip install reactor-egress
+```
 
-Config is passed as a typed Python dict (or a validated `WorkerConfig`), not YAML/JSON files.
+To use this package from another local project:
+
+1. Create/activate a Python 3.11+ virtual environment in your app project.
+2. Install this repository as an editable dependency:
+
+```bash
+pip install -e /path/to/reactor-egress
+```
+
+If you use `uv`:
+
+```bash
+uv add --editable /path/to/reactor-egress
+```
+
+`RtmpSink` requires `ffmpeg` to be available in `PATH`.
+
+For a pinned local build install:
+
+```bash
+cd /path/to/reactor-egress
+uv build
+pip install dist/reactor_egress-0.1.0-py3-none-any.whl
+```
+
+## Usage
 
 ```python
+import asyncio
 from reactor_sdk import Reactor
-from worker import EgressWorker
 
-reactor = Reactor(model_name="livecore", api_key=api_key)
-# connect/start Reactor in your app code before running egress
+from reactor_egress import AudioOptions, RtmpTarget, VideoOptions, stream_reactor_to_rtmp
 
-config = {
-    "job": {"id": "job_1", "name": "demo"},
-    "source": {"type": "reactor"},
-    "sink": {"type": "rtmp", "url": "rtmp://localhost/live", "stream_key_ref": "env:RTMP_STREAM_KEY"},
-    "video": {
-        "fps": 24,
-        "width": 1280,
-        "height": 720,
-        "pixel_format": "yuv420p",
-        "bitrate_kbps": 1200,
-        "keyframe_interval_sec": 2,
-    },
-}
 
-worker = EgressWorker.from_config(config, reactor_client=reactor)
-exit_code = await worker.run()
+async def main() -> None:
+    reactor = Reactor(model_name="livecore", api_key="...")
+
+    # Reactor client lifecycle is owned by your app.
+    await reactor.connect()
+    await reactor.send_command("start", {})
+
+    await stream_reactor_to_rtmp(
+        reactor_client=reactor,
+        target=RtmpTarget(
+            url="rtmps://a.rtmp.youtube.com/live2",
+            stream_key="your-stream-key",
+        ),
+        video=VideoOptions(
+            fps=30,
+            width=832,
+            height=480,
+            pixel_format="yuv420p",
+            bitrate_kbps=1000,
+            keyframe_interval_sec=2,
+        ),
+        audio=AudioOptions(inject_silence=True, sample_rate=48000, channels=2),
+    )
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
-You can also use helpers:
+## Runtime model
 
-```python
-from worker import run_egress
+- No built-in retry loop.
+- No signal handling.
+- No state machine or worker exit codes.
+- One source to one sink per session.
+- `run_until_cancelled()` closes resources and re-raises cancellation.
 
-exit_code = await run_egress(config, reactor_client=reactor)
+## Release
+
+Build distribution artifacts:
+
+```bash
+uv build
 ```
 
-There is no CLI entrypoint for runtime execution.
+Publish to PyPI (when credentials are configured):
+
+```bash
+uv run --with build --with twine python -m twine upload dist/*
+```

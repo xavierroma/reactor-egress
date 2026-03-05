@@ -3,16 +3,22 @@ requires = ["hatchling>=1.27.0"]
 build-backend = "hatchling.build"
 
 [project]
-name = "reactor-egress-worker"
+name = "reactor-egress"
 version = "0.1.0"
-description = "Phase 1 local worker for Reactor -> RTMP egress"
+description = "Deploy-anywhere Reactor egress library for Reactor source and RTMP sinks"
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [
   { name = "Reactor Egress" }
 ]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Intended Audience :: Developers",
+  "Topic :: Multimedia :: Video",
+]
 dependencies = [
-  "pydantic>=2.9.0,<3",
   "reactor-sdk>=0.2.2",
 ]
 
@@ -20,6 +26,10 @@ dependencies = [
 test = [
   "pytest>=8.3.0,<9",
   "pytest-asyncio>=0.24.0,<1",
+]
+dev = [
+  "build>=1.2.2,<2",
+  "twine>=5.1.1,<6",
 ]
 
 [tool.pytest.ini_options]
@@ -31,4 +41,13 @@ markers = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["worker"]
+packages = ["reactor_egress"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/reactor_egress",
+  "/examples",
+  "/tests",
+  "/README.md",
+  "/pyproject.toml",
+]
