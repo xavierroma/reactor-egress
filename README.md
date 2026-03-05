@@ -42,7 +42,7 @@ pip install dist/reactor_egress-0.1.0-py3-none-any.whl
 import asyncio
 from reactor_sdk import Reactor
 
-from reactor_egress import AudioOptions, RtmpTarget, VideoOptions, stream_reactor_to_rtmp
+from reactor_egress import AudioOptions, RtmpTarget, VideoOptions, to_rtmp
 
 
 async def main() -> None:
@@ -52,7 +52,7 @@ async def main() -> None:
     await reactor.connect()
     await reactor.send_command("start", {})
 
-    await stream_reactor_to_rtmp(
+    await to_rtmp(
         reactor_client=reactor,
         target=RtmpTarget(
             url="rtmps://a.rtmp.youtube.com/live2",
@@ -67,6 +67,8 @@ async def main() -> None:
             keyframe_interval_sec=2,
         ),
         audio=AudioOptions(inject_silence=True, sample_rate=48000, channels=2),
+        # Wait up to 180s for a remote video track before failing.
+        track_wait_timeout_sec=180.0,
     )
 
 
@@ -77,6 +79,7 @@ if __name__ == "__main__":
 ## Runtime model
 
 - No built-in retry loop.
+- Waits for a remote video track at startup (default 30s, configurable).
 - No signal handling.
 - No state machine or worker exit codes.
 - One source to one sink per session.

@@ -20,7 +20,7 @@ EXPECTED_PUBLIC = {
     "SourceInfo",
     "VideoFrame",
     "VideoOptions",
-    "stream_reactor_to_rtmp",
+    "to_rtmp",
 }
 
 

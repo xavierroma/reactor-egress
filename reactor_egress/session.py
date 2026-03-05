@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from numbers import Real
 
 from reactor_sdk import Reactor
 
@@ -30,9 +31,20 @@ class EgressSession:
         target: RtmpTarget,
         video: VideoOptions = VideoOptions(),
         audio: AudioOptions = AudioOptions(),
+        track_wait_timeout_sec: float = 30.0,
         logger: logging.Logger | None = None,
     ) -> EgressSession:
-        source = ReactorSource(reactor_client=reactor_client, video=video, logger=logger)
+        if isinstance(track_wait_timeout_sec, bool) or not isinstance(track_wait_timeout_sec, Real):
+            raise EgressError("track_wait_timeout_sec must be numeric")
+        if track_wait_timeout_sec < 0:
+            raise EgressError("track_wait_timeout_sec must be >= 0")
+
+        source = ReactorSource(
+            reactor_client=reactor_client,
+            video=video,
+            track_wait_timeout_sec=track_wait_timeout_sec,
+            logger=logger,
+        )
         sink = RtmpSink(target=target, video=video, audio=audio, logger=logger)
         return cls(source=source, sink=sink, logger=logger)
 
@@ -101,12 +113,13 @@ class EgressSession:
             raise source_error
 
 
-async def stream_reactor_to_rtmp(
+async def to_rtmp(
     *,
     reactor_client: Reactor,
     target: RtmpTarget,
     video: VideoOptions = VideoOptions(),
     audio: AudioOptions = AudioOptions(),
+    track_wait_timeout_sec: float = 30.0,
     logger: logging.Logger | None = None,
 ) -> None:
     session = EgressSession.reactor_to_rtmp(
@@ -114,6 +127,7 @@ async def stream_reactor_to_rtmp(
         target=target,
         video=video,
         audio=audio,
+        track_wait_timeout_sec=track_wait_timeout_sec,
         logger=logger,
     )
     await session.run_until_cancelled()

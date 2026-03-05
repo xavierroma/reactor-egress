@@ -16,6 +16,11 @@ class FakeFrame:
     pixel_format: str = "yuv420p"
 
 
+@dataclass
+class FakeStatus:
+    value: str
+
+
 class FakeTrack:
     kind = "video"
     width = 16
@@ -69,6 +74,24 @@ class FakeClient:
     def get_remote_tracks(self) -> object:
         self.calls.append("get_remote_tracks")
         return self._tracks
+
+
+class FakeClientTracksSequence(FakeClient):
+    def __init__(self, tracks_sequence: list[object], *, status: str = "ready") -> None:
+        if not tracks_sequence:
+            tracks_sequence = [{}]
+        super().__init__(tracks_sequence[0])
+        self._tracks_sequence = tracks_sequence
+        self._status = status
+
+    def get_remote_tracks(self) -> object:
+        self.calls.append("get_remote_tracks")
+        if len(self._tracks_sequence) > 1:
+            return self._tracks_sequence.pop(0)
+        return self._tracks_sequence[0]
+
+    def get_status(self) -> FakeStatus:
+        return FakeStatus(value=self._status)
 
 
 class FakeClientMissingTracksApi:
@@ -166,3 +189,50 @@ async def test_first_frame_overrides_mismatched_track_metadata() -> None:
     assert info.height == 24
     assert frame.width == 32
     assert frame.height == 24
+
+
+@pytest.mark.asyncio
+async def test_waits_for_remote_video_track_until_timeout_window() -> None:
+    client = FakeClientTracksSequence(
+        [{"audio-main": FakeAudioTrack()}, {"video-main": FakeTrack()}],
+        status="starting",
+    )
+    source = ReactorSource(
+        reactor_client=client,
+        video=VideoOptions(width=16, height=16, fps=24, pixel_format="yuv420p", bitrate_kbps=300, keyframe_interval_sec=2),
+        track_wait_timeout_sec=0.2,
+        logger=logging.getLogger(__name__),
+    )
+
+    info = await source.open()
+    await source.close()
+
+    assert info.width == 16
+    assert client.calls.count("get_remote_tracks") >= 2
+
+
+@pytest.mark.asyncio
+async def test_track_wait_timeout_reports_status() -> None:
+    client = FakeClientTracksSequence([{"audio-main": FakeAudioTrack()}], status="starting")
+    source = ReactorSource(
+        reactor_client=client,
+        video=VideoOptions(width=16, height=16, fps=24, pixel_format="yuv420p", bitrate_kbps=300, keyframe_interval_sec=2),
+        track_wait_timeout_sec=0.05,
+        logger=logging.getLogger(__name__),
+    )
+
+    with pytest.raises(SourceError, match="timed out waiting for remote video track") as exc_info:
+        await source.open()
+
+    assert "status=starting" in str(exc_info.value)
+    assert client.calls.count("get_remote_tracks") >= 2
+
+
+def test_negative_track_wait_timeout_is_rejected() -> None:
+    with pytest.raises(ConfigError, match="track_wait_timeout_sec must be >= 0"):
+        ReactorSource(
+            reactor_client=FakeClient({"video-main": FakeTrack()}),
+            video=VideoOptions(width=16, height=16, fps=24, pixel_format="yuv420p", bitrate_kbps=300, keyframe_interval_sec=2),
+            track_wait_timeout_sec=-1,
+            logger=logging.getLogger(__name__),
+        )

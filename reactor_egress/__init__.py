@@ -1,7 +1,7 @@
 """Deploy-anywhere library for Reactor egress."""
 
 from reactor_egress.errors import ConfigError, EgressError, SinkError, SourceError
-from reactor_egress.session import EgressSession, stream_reactor_to_rtmp
+from reactor_egress.session import EgressSession, to_rtmp
 from reactor_egress.sink import RtmpSink
 from reactor_egress.source import ReactorSource
 from reactor_egress.types import AudioOptions, RtmpTarget, SourceInfo, VideoFrame, VideoOptions
@@ -19,5 +19,5 @@ __all__ = [
     "SourceInfo",
     "VideoFrame",
     "VideoOptions",
-    "stream_reactor_to_rtmp",
+    "to_rtmp",
 ]

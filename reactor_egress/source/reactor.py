@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 import logging
+from numbers import Real
 import time
 from typing import cast
 
@@ -20,14 +21,20 @@ class ReactorSource:
         self,
         reactor_client: Reactor,
         video: VideoOptions,
+        track_wait_timeout_sec: float = 0.0,
         logger: logging.Logger | None = None,
     ) -> None:
         if reactor_client is None:
             raise ConfigError("reactor_client is required")
+        if isinstance(track_wait_timeout_sec, bool) or not isinstance(track_wait_timeout_sec, Real):
+            raise ConfigError("track_wait_timeout_sec must be numeric")
+        if track_wait_timeout_sec < 0:
+            raise ConfigError("track_wait_timeout_sec must be >= 0")
 
         self._video = video
         self._logger = logger or logging.getLogger("reactor_egress.source.reactor")
         self._client = reactor_client
+        self._track_wait_timeout_sec = float(track_wait_timeout_sec)
 
         self._track: MediaStreamTrack | None = None
         self._prefetched_frames: deque[VideoFrame] = deque()
@@ -64,11 +71,38 @@ class ReactorSource:
         get_tracks = getattr(self._client, "get_remote_tracks", None)
         if not callable(get_tracks):
             raise ConfigError("reactor_client must expose get_remote_tracks()")
-        tracks = cast(dict[str, MediaStreamTrack], get_tracks())
-        track = _select_remote_track(tracks)
-        if track is None:
-            raise SourceError("no remote video track available from reactor_client")
-        return track
+
+        timeout_sec = self._track_wait_timeout_sec
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_sec
+        next_log_at = loop.time()
+
+        while True:
+            tracks = cast(dict[str, MediaStreamTrack], get_tracks())
+            track = _select_remote_track(tracks)
+            if track is not None:
+                return track
+
+            now = loop.time()
+            if now >= next_log_at and timeout_sec > 0:
+                remaining = max(0.0, deadline - now)
+                status = _reactor_status_value(self._client)
+                self._logger.info(
+                    "waiting for remote video track (status=%s, %.0fs remaining)",
+                    status,
+                    remaining,
+                )
+                next_log_at = now + 5.0
+
+            if now >= deadline:
+                status = _reactor_status_value(self._client)
+                if timeout_sec <= 0:
+                    raise SourceError("no remote video track available from reactor_client")
+                raise SourceError(
+                    f"timed out waiting for remote video track after {timeout_sec:.0f}s (status={status})"
+                )
+
+            await asyncio.sleep(min(0.5, deadline - now))
 
     def _derive_source_info(self, track: MediaStreamTrack) -> SourceInfo:
         width = int(getattr(track, "width", self._video.width))
@@ -176,3 +210,18 @@ def _is_video_track(track: MediaStreamTrack) -> bool:
     if isinstance(kind, str):
         return kind.lower() == "video"
     return True
+
+
+def _reactor_status_value(reactor_client: Reactor) -> str:
+    get_status = getattr(reactor_client, "get_status", None)
+    if not callable(get_status):
+        return "unknown"
+    try:
+        status = get_status()
+    except Exception:  # pragma: no cover - defensive
+        return "unknown"
+
+    value = getattr(status, "value", None)
+    if isinstance(value, str):
+        return value
+    return str(status)

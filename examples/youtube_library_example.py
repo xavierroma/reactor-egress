@@ -6,10 +6,9 @@ import asyncio
 import os
 from pathlib import Path
 
-from aiortc import MediaStreamTrack
 from reactor_sdk import Reactor, ReactorStatus
 
-from reactor_egress import AudioOptions, RtmpTarget, VideoOptions, stream_reactor_to_rtmp
+from reactor_egress import AudioOptions, RtmpTarget, VideoOptions, to_rtmp
 
 YOUTUBE_RTMP_BASE_URL = "rtmps://a.rtmp.youtube.com/live2"
 PROMPT = "cinematic flyover over San Francisco at dusk"
@@ -43,40 +42,6 @@ async def _create_started_reactor(*, model_name: str, api_key: str, prompt: str)
     )
     await reactor.send_command("start", {})
     return reactor
-
-
-async def _wait_for_remote_video_track(reactor_client: Reactor, *, timeout_sec: float = 30.0) -> None:
-    deadline = asyncio.get_running_loop().time() + timeout_sec
-    next_log_at = asyncio.get_running_loop().time()
-    while True:
-        tracks = reactor_client.get_remote_tracks()
-        if _has_video_track(tracks):
-            return
-
-        now = asyncio.get_running_loop().time()
-        if now >= next_log_at:
-            remaining = max(0.0, deadline - now)
-            status = reactor_client.get_status().value
-            print(f"Waiting for remote video track (status={status}, {remaining:.0f}s remaining)...")
-            next_log_at = now + 5.0
-        if now >= deadline:
-            status = reactor_client.get_status().value
-            raise RuntimeError(
-                f"Timed out waiting for remote video track after {timeout_sec:.0f}s (status={status}). "
-                "Verify the model is running and publishing a video track."
-            )
-        await asyncio.sleep(min(0.5, deadline - now))
-
-
-def _has_video_track(tracks: dict[str, MediaStreamTrack]) -> bool:
-    return any(_is_video_track(track) for track in tracks.values())
-
-
-def _is_video_track(track: MediaStreamTrack) -> bool:
-    kind = getattr(track, "kind", None)
-    if isinstance(kind, str):
-        return kind.lower() == "video"
-    return True
 
 
 def _get_required_env(name: str) -> str:
@@ -151,8 +116,7 @@ async def run_youtube_example(*, reactor_client: Reactor | None = None) -> None:
         )
 
     try:
-        await _wait_for_remote_video_track(client, timeout_sec=_get_track_timeout_sec())
-        await stream_reactor_to_rtmp(
+        await to_rtmp(
             reactor_client=client,
             target=RtmpTarget(url=YOUTUBE_RTMP_BASE_URL, stream_key=stream_key),
             video=VideoOptions(
@@ -164,6 +128,7 @@ async def run_youtube_example(*, reactor_client: Reactor | None = None) -> None:
                 keyframe_interval_sec=2,
             ),
             audio=AudioOptions(inject_silence=True, sample_rate=48000, channels=2),
+            track_wait_timeout_sec=_get_track_timeout_sec(),
         )
     finally:
         if owns_reactor:

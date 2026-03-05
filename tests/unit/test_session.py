@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from reactor_egress import EgressError, EgressSession, SinkError, SourceInfo, VideoFrame
+from reactor_egress import EgressError, EgressSession, RtmpTarget, SinkError, SourceInfo, VideoFrame
 
 
 class FakeSource:
@@ -45,6 +45,11 @@ class FakeSink:
 class FailingSink(FakeSink):
     async def open(self, _source: SourceInfo) -> None:  # type: ignore[override]
         raise SinkError("sink boom")
+
+
+class FakeReactorClient:
+    def get_remote_tracks(self) -> dict[str, object]:
+        return {}
 
 
 @pytest.mark.asyncio
@@ -113,3 +118,22 @@ async def test_run_until_cancelled_closes_and_reraises_cancelled_error() -> None
 
     assert sink.closed is True
     assert source.closed is True
+
+
+def test_reactor_to_rtmp_wires_track_wait_timeout() -> None:
+    session = EgressSession.reactor_to_rtmp(
+        reactor_client=FakeReactorClient(),  # type: ignore[arg-type]
+        target=RtmpTarget(url="rtmp://localhost/live"),
+        track_wait_timeout_sec=12.5,
+    )
+
+    assert getattr(session._source, "_track_wait_timeout_sec") == 12.5
+
+
+def test_reactor_to_rtmp_rejects_negative_track_wait_timeout() -> None:
+    with pytest.raises(EgressError, match="track_wait_timeout_sec must be >= 0"):
+        EgressSession.reactor_to_rtmp(
+            reactor_client=FakeReactorClient(),  # type: ignore[arg-type]
+            target=RtmpTarget(url="rtmp://localhost/live"),
+            track_wait_timeout_sec=-1,
+        )
