@@ -105,11 +105,13 @@ class ReactorSource:
             await asyncio.sleep(min(0.5, deadline - now))
 
     def _derive_source_info(self, track: MediaStreamTrack) -> SourceInfo:
-        width = int(getattr(track, "width", self._video.width))
-        height = int(getattr(track, "height", self._video.height))
         fps = int(getattr(track, "fps", self._video.fps))
-        pixel_format = str(getattr(track, "pixel_format", self._video.pixel_format))
-        return SourceInfo(width=width, height=height, fps=fps, pixel_format=pixel_format)
+        return SourceInfo(
+            width=self._video.width,
+            height=self._video.height,
+            fps=fps,
+            pixel_format=self._video.pixel_format,
+        )
 
     async def _probe_source_info_from_frame(self, base: SourceInfo) -> SourceInfo:
         if self._track is None:
@@ -118,7 +120,10 @@ class ReactorSource:
         deadline = time.monotonic() + 3.0
         observed: VideoFrame | None = None
 
-        for _ in range(5):
+        # Reactor can emit a short black warmup burst at 1280x720 before switching
+        # to the real generation resolution (for example 832x480). Probe enough
+        # initial frames to lock onto the steady-state source shape.
+        for _ in range(30):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
@@ -135,16 +140,37 @@ class ReactorSource:
             self._logger.warning("timed out probing initial Reactor frames; using metadata defaults")
             return base
 
-        return SourceInfo(
-            width=observed.width,
-            height=observed.height,
-            fps=base.fps,
-            pixel_format=observed.pixel_format,
-        )
+        return base
 
     def _to_video_frame(self, raw_frame: object) -> VideoFrame:
         if isinstance(raw_frame, VideoFrame):
             return raw_frame
+
+        # Normalize incoming frames to configured output geometry/pixel format so
+        # downstream sink/ffmpeg dimensions remain stable across Reactor warmup
+        # resolution changes.
+        reformat = getattr(raw_frame, "reformat", None)
+        to_ndarray = getattr(raw_frame, "to_ndarray", None)
+        if callable(reformat) and callable(to_ndarray):
+            try:
+                normalized = reformat(
+                    width=self._video.width,
+                    height=self._video.height,
+                    format=self._video.pixel_format,
+                )
+                array = normalized.to_ndarray(format=self._video.pixel_format)
+                data = bytes(array.tobytes())
+                pts = getattr(normalized, "pts", None)
+                pts_ms = int(pts) if isinstance(pts, int) else None
+                return VideoFrame(
+                    data=data,
+                    width=self._video.width,
+                    height=self._video.height,
+                    pixel_format=self._video.pixel_format,
+                    pts_ms=pts_ms,
+                )
+            except Exception:
+                pass
 
         data, pixel_format = _coerce_frame_data(raw_frame, target_format=self._video.pixel_format)
         width = int(getattr(raw_frame, "width", self._video.width))

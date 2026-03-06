@@ -102,18 +102,15 @@ def _get_ready_timeout_sec() -> float:
     return value
 
 
-async def run_youtube_example(*, reactor_client: Reactor | None = None) -> None:
+async def start() -> None:
     stream_key = _get_required_env("YOUTUBE_STREAM_KEY")
+    api_key = _get_required_env("REACTOR_API_KEY")
 
-    client = reactor_client
-    owns_reactor = client is None
-    if client is None:
-        api_key = _get_required_env("REACTOR_API_KEY")
-        client = await _create_started_reactor(
-            model_name=MODEL_NAME,
-            api_key=api_key,
-            prompt=PROMPT,
-        )
+    client = await _create_started_reactor(
+        model_name=MODEL_NAME,
+        api_key=api_key,
+        prompt=PROMPT,
+    )
 
     try:
         await to_rtmp(
@@ -131,12 +128,11 @@ async def run_youtube_example(*, reactor_client: Reactor | None = None) -> None:
             track_wait_timeout_sec=_get_track_timeout_sec(),
         )
     finally:
-        if owns_reactor:
-            await client.disconnect()
+        await client.disconnect()
 
 
 if __name__ == "__main__":
     try:
-        asyncio.run(run_youtube_example())
+        asyncio.run(start())
     except KeyboardInterrupt:
         pass
